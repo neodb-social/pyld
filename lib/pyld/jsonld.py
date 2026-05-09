@@ -18,6 +18,7 @@ import copy
 import json
 import re
 import sys
+import threading
 import uuid
 import warnings
 from collections.abc import Callable
@@ -130,12 +131,61 @@ DEFAULT_BASE_IRI = 'http://example.org/base/'
 # Restraints
 MAX_CONTEXT_URLS = 10
 
+# cachetools.LRUCache is not thread-safe, but pyld stores its module-level
+# inverse-context and resolved-context caches as singletons shared across
+# JsonLdProcessor invocations from any thread. Without this wrapper,
+# concurrent compaction races on popitem/__setitem__ and corrupts the
+# underlying OrderedDict (see _get_inverse_context).
+class _ThreadSafeLRUCache(LRUCache):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # RLock because LRUCache.__setitem__ may call self.popitem()
+        # internally on eviction; both methods need to acquire the lock.
+        self._lock = threading.RLock()
+
+    def __getitem__(self, key):
+        with self._lock:
+            return super().__getitem__(key)
+
+    def __setitem__(self, key, value):
+        with self._lock:
+            super().__setitem__(key, value)
+
+    def __delitem__(self, key):
+        with self._lock:
+            super().__delitem__(key)
+
+    def __contains__(self, key):
+        with self._lock:
+            return super().__contains__(key)
+
+    def __len__(self):
+        with self._lock:
+            return super().__len__()
+
+    def __iter__(self):
+        with self._lock:
+            return iter(list(super().__iter__()))
+
+    def get(self, key, default=None):
+        with self._lock:
+            return super().get(key, default)
+
+    def pop(self, *args, **kwargs):
+        with self._lock:
+            return super().pop(*args, **kwargs)
+
+    def popitem(self):
+        with self._lock:
+            return super().popitem()
+
+
 # resolved context cache
 # TODO: consider basing max on context size rather than number
 RESOLVED_CONTEXT_CACHE_MAX_SIZE = 100
-_resolved_context_cache = LRUCache(maxsize=RESOLVED_CONTEXT_CACHE_MAX_SIZE)
+_resolved_context_cache = _ThreadSafeLRUCache(maxsize=RESOLVED_CONTEXT_CACHE_MAX_SIZE)
 INVERSE_CONTEXT_CACHE_MAX_SIZE = 20
-_inverse_context_cache = LRUCache(maxsize=INVERSE_CONTEXT_CACHE_MAX_SIZE)
+_inverse_context_cache = _ThreadSafeLRUCache(maxsize=INVERSE_CONTEXT_CACHE_MAX_SIZE)
 # Initial contexts, defined on first access
 INITIAL_CONTEXTS = {}
 
