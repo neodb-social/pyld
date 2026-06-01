@@ -21,7 +21,6 @@ import json
 import math
 import re
 import sys
-import threading
 import uuid
 import warnings
 from collections.abc import Callable
@@ -30,7 +29,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 import lxml.html
-from cachetools import LRUCache
 from frozendict import frozendict
 
 from c14n.Canonicalize import canonicalize
@@ -56,6 +54,7 @@ from .options import (
     NormalizeOptions,
     ToRdfOptions,
 )
+from .resolved_context import ThreadSafeLRUCache
 
 __all__ = [
     '__copyright__',
@@ -157,61 +156,16 @@ LINK_HEADER_REL = JSON_LD_NS + 'context'
 # Default base IRI if none is provided through input or options
 DEFAULT_BASE_IRI = 'http://example.org/base/'
 
-# cachetools.LRUCache is not thread-safe, but pyld stores its module-level
-# inverse-context and resolved-context caches as singletons shared across
-# JsonLdProcessor invocations from any thread. Without this wrapper,
-# concurrent compaction races on popitem/__setitem__ and corrupts the
-# underlying OrderedDict (see _get_inverse_context).
-class _ThreadSafeLRUCache(LRUCache):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # RLock because LRUCache.__setitem__ may call self.popitem()
-        # internally on eviction; both methods need to acquire the lock.
-        self._lock = threading.RLock()
-
-    def __getitem__(self, key):
-        with self._lock:
-            return super().__getitem__(key)
-
-    def __setitem__(self, key, value):
-        with self._lock:
-            super().__setitem__(key, value)
-
-    def __delitem__(self, key):
-        with self._lock:
-            super().__delitem__(key)
-
-    def __contains__(self, key):
-        with self._lock:
-            return super().__contains__(key)
-
-    def __len__(self):
-        with self._lock:
-            return super().__len__()
-
-    def __iter__(self):
-        with self._lock:
-            return iter(list(super().__iter__()))
-
-    def get(self, key, default=None):
-        with self._lock:
-            return super().get(key, default)
-
-    def pop(self, *args, **kwargs):
-        with self._lock:
-            return super().pop(*args, **kwargs)
-
-    def popitem(self):
-        with self._lock:
-            return super().popitem()
-
-
 # resolved context cache
 # TODO: consider basing max on context size rather than number
+# `ThreadSafeLRUCache` (defined in resolved_context) wraps cachetools.LRUCache
+# with a lock: these module-level caches are singletons shared across
+# JsonLdProcessor invocations from any thread, so concurrent compaction would
+# otherwise race on popitem/__setitem__ and corrupt the underlying OrderedDict.
 RESOLVED_CONTEXT_CACHE_MAX_SIZE = 100
-_resolved_context_cache = _ThreadSafeLRUCache(maxsize=RESOLVED_CONTEXT_CACHE_MAX_SIZE)
+_resolved_context_cache = ThreadSafeLRUCache(maxsize=RESOLVED_CONTEXT_CACHE_MAX_SIZE)
 INVERSE_CONTEXT_CACHE_MAX_SIZE = 20
-_inverse_context_cache = _ThreadSafeLRUCache(maxsize=INVERSE_CONTEXT_CACHE_MAX_SIZE)
+_inverse_context_cache = ThreadSafeLRUCache(maxsize=INVERSE_CONTEXT_CACHE_MAX_SIZE)
 # Initial contexts, defined on first access
 INITIAL_CONTEXTS = {}
 
